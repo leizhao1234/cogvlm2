@@ -151,6 +151,18 @@ def get_linear(weight, bias, quantize):
             bias,
             quant_type="nf4",
         )
+    elif quantize == "exl2":
+        try:
+            qtensors, bits = weight
+        except Exception:
+            raise NotImplementedError(
+                f"The passed weight is not `exl2` compatible, loader needs to be updated."
+            )
+
+        from text_generation_server.layers.gptq import ExllamaQuantLinear
+
+        linear = ExllamaQuantLinear.from_exl2(qtensors, bias, bits)
+
     elif quantize == "gptq":
         try:
             qweight, qzeros, scales, g_idx, bits, groupsize, use_exllama = weight

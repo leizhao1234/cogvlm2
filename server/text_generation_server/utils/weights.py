@@ -50,6 +50,7 @@ class Weights:
         if self.prefix is not None:
             prefixed = f"{self.prefix}.{tensor_name}"
             names.append(prefixed)
+        logger.info(f"get_filename: {names}")
         for name in names:
             filename = self.routing.get(name, None)
             if filename is not None:
@@ -208,7 +209,44 @@ class Weights:
         return weight
 
     def get_multi_weights_col(self, prefixes: List[str], quantize: str, dim: int):
-        if quantize in ["gptq", "awq"]:
+        if quantize == "exl2":
+            # qtensors = self.load_multi(key, ["q_weight", "q_invperm", "q_scale", "q_scale_max", "q_groups", "q_perm", "bias"])
+            # qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
+
+            qtensors = {}
+            for param in [
+                "q_weight",
+                "q_scale",
+            ]:
+                shapes = [
+                    self.get_sharded(f"{p}.{param}", dim=1).shape for p in prefixes
+                ]
+                logger.info(f"shapes: {shapes}")
+                qtensors[param] = torch.cat(
+                    [self.get_sharded(f"{p}.{param}", dim=1) for p in prefixes], dim=1
+                )
+
+            for param in [
+                "q_invperm",
+                "q_scale_max",
+                "q_groups",
+            ]:
+                shapes = [
+                    self.get_sharded(f"{p}.{param}", dim=0).shape for p in prefixes
+                ]
+                logger.info(f"{shapes}")
+                qtensors[param] = torch.cat(
+                    [self.get_sharded(f"{p}.{param}", dim=0) for p in prefixes], dim=0
+                )
+
+            qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
+
+            # bits, groupsize, desc_act, quant_method = self._get_gptq_params()
+            bits = self._get_exl2_bits()
+
+            weight = (qtensors, bits)
+
+        elif quantize in ["gptq", "awq"]:
             try:
                 qweight = torch.cat(
                     [self.get_sharded(f"{p}.qweight", dim=1) for p in prefixes], dim=1
@@ -282,7 +320,21 @@ class Weights:
         return tensor
 
     def get_multi_weights_row(self, prefix: str, quantize: str):
-        if quantize == "gptq":
+        if quantize == "exl2":
+            qtensors = {}
+            for param in [
+                "q_weight",
+                "q_scale",
+                "q_invperm",
+                "q_scale_max",
+                "q_groups",
+            ]:
+                qtensors[param] = self.get_sharded(f"{prefix}.{param}", dim=0)
+
+            bits = self._get_exl2_bits()
+            weight = (qtensors, bits)
+
+        elif quantize == "gptq":
             use_exllama = True
             bits, groupsize, desc_act, quant_method = self._get_gptq_params()
 
@@ -383,6 +435,9 @@ class Weights:
         else:
             weight = self.get_sharded(f"{prefix}.weight", dim=1)
         return weight
+
+    def _get_exl2_bits(self) -> int:
+        return self.gptq_bits
 
     def _get_gptq_params(self) -> Tuple[int, int, int, str]:
         try:

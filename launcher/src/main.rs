@@ -37,6 +37,9 @@ enum Quantization {
     /// Should be a drop-in replacement to bitsandbytes with much better performance.
     /// Kernels are from <https://github.com/NetEase-FuXi/EETQ.git>
     Eetq,
+    /// 2, 3, 4, 5, 6, and 8 bit quantization. Requires a specific model EXL2 quantized
+    /// model: <https://hf.co/models?search=gptq>. Requires ExLlamaV2 kernels.
+    Exl2,
     /// 4 bit quantization. Requires a specific GTPQ quantized model: <https://hf.co/models?search=gptq>.
     /// text-generation-inference will use exllama (faster) kernels wherever possible, and use
     /// triton kernel (wider support) when it's not.
@@ -76,6 +79,9 @@ impl std::fmt::Display for Quantization {
             }
             Quantization::BitsandbytesFP4 => {
                 write!(f, "bitsandbytes-fp4")
+            }
+            Quantization::Exl2 => {
+                write!(f, "exl2")
             }
             Quantization::Gptq => {
                 write!(f, "gptq")

@@ -82,6 +82,15 @@ def load_attention(config, prefix, weights):
             )
 
 
+def load_attention_exl2(config, prefix, weights):
+    bias = config.attention_bias
+    return (
+        TensorParallelColumnLinear.load(config, f"{prefix}.q_proj", weights, bias),
+        TensorParallelColumnLinear.load(config, f"{prefix}.k_proj", weights, bias),
+        TensorParallelColumnLinear.load(config, f"{prefix}.v_proj", weights, bias),
+    )
+
+
 class FlashLlamaAttention(torch.nn.Module):
     def __init__(
         self,
@@ -113,7 +122,12 @@ class FlashLlamaAttention(torch.nn.Module):
             config.num_key_value_heads // weights.process_group.size()
         )
 
-        self.query_key_value = load_attention(config, prefix, weights)
+        if config.quantize == "exl2":
+            self.query, self.key, self.value = load_attention_exl2(
+                config, prefix, weights
+            )
+        else:
+            self.query_key_value = load_attention(config, prefix, weights)
 
         self.o_proj = TensorParallelRowLinear.load(
             config,
@@ -138,16 +152,23 @@ class FlashLlamaAttention(torch.nn.Module):
         input_lengths,
         max_s,
     ):
-        qkv = self.query_key_value(hidden_states)
-        query, kv = qkv.split(
-            [
-                self.head_size * self.num_heads,
-                2 * self.head_size * self.num_key_value_heads,
-            ],
-            dim=1,
-        )
-        query = query.view(-1, self.num_heads, self.head_size)
-        kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
+        if hasattr(self, "query_key_value"):
+            qkv = self.query_key_value(hidden_states)
+            query, kv = qkv.split(
+                [
+                    self.head_size * self.num_heads,
+                    2 * self.head_size * self.num_key_value_heads,
+                ],
+                dim=1,
+            )
+            query = query.view(-1, self.num_heads, self.head_size)
+            kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
+        else:
+            query = self.query(hidden_states).view(-1, self.num_heads, self.head_size)
+            kv = torch.concat(
+                [self.key(hidden_states), self.value(hidden_states)], dim=1
+            )
+            kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
 
         self.rotary_emb(query, torch.select(kv, dim=1, index=0), cos, sin)
 
@@ -205,7 +226,14 @@ class LlamaMLP(nn.Module):
         )
         # Fuse gate and up proj
         bias = getattr(config, "mlp_bias", False)
-        if config.model_type == "phi3":
+        if config.quantize == "exl2":
+            self.gate_proj = TensorParallelColumnLinear.load(
+                config, f"{prefix}.gate_proj", weights, bias
+            )
+            self.up_proj = TensorParallelColumnLinear.load(
+                config, f"{prefix}.up_proj", weights, bias
+            )
+        elif config.model_type == "phi3":
             self.gate_up_proj = TensorParallelColumnLinear.load_gate_up(
                 config,
                 prefix=f"{prefix}.gate_up_proj",
@@ -249,9 +277,16 @@ class LlamaMLP(nn.Module):
             _custom_C.LLMM_Silu(self.gate_up_proj.linear.weight, hidden_states, out, 8)
             return self.down_proj(out)
         else:
-            gate_up_states = self.gate_up_proj(hidden_states)
-            gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
-            return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
+            if hasattr(self, "gate_up_proj"):
+                gate_up_states = self.gate_up_proj(hidden_states)
+                gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
+                return self.down_proj(
+                    self.act(gate_up_states[:, 0]) * gate_up_states[:, 1]
+                )
+            else:
+                gate = self.act(self.gate_proj(hidden_states))
+                intermediate = self.act(self.up_proj(hidden_states))
+                return gate * intermediate
 
 
 class FlashLlamaLayer(nn.Module):
@@ -401,7 +436,7 @@ class FlashLlamaForCausalLM(torch.nn.Module):
 
         self.lm_head = SpeculativeHead.load(
             config,
-            prefix=suffix if not prefix else f"{prefix}.suffix",
+            prefix=suffix if not prefix else f"{prefix}.{suffix}",
             weights=weights,
         )
 

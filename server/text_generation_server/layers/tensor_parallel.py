@@ -21,7 +21,10 @@ class TensorParallelHead(SuperLayer):
 
     @staticmethod
     def load(config, prefix: str, weights):
-        if weights.process_group.size() > 1:
+        if config.quantize == "exl2":
+            weight = weights.get_multi_weights_col([prefix], config.quantize, dim=0)
+            should_gather = weights.process_group.size() > 1
+        elif weights.process_group.size() > 1:
             try:
                 weight = weights.get_sharded(f"{prefix}.weight", dim=0)
                 should_gather = True

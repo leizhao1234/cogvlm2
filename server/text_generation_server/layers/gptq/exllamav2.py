@@ -1,5 +1,6 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
+from typing import Dict, Optional, Type
 import torch
 import torch.nn as nn
 
@@ -147,14 +148,19 @@ class QuantLinear(nn.Module):
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     # def __init__(self, bits, group_size, infeatures, outfeatures, bias, trainable=False, **kwargs):
-    def __init__(self, qweight, qzeros, scales, g_idx, bias, bits, groupsize):
+    def __init__(self, q_tensors: Dict[str, torch.Tensor], bias, bits):
         super().__init__()
-        if bits != 4:
-            raise ValueError(
-                f"Exllamav2 kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
-            )
+        # if bits != 4:
+        #    raise ValueError(
+        #        f"Exllamav2 kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
+        #    )
         self.q_handle = None
-        self.q_tensors = None
+        self.q_tensors = q_tensors
+
+        qweight = (
+            q_tensors["q_weight"] if "q_weight" in q_tensors else q_tensors["qweight"]
+        )
+
         self.bits = bits
         self.maxq = 2**self.bits - 1
         self.infeatures = qweight.shape[0] // self.bits * 32
@@ -162,27 +168,39 @@ class QuantLinear(nn.Module):
         self.padding = -self.outfeatures % 32
         self.outfeatures = self.outfeatures + self.padding
 
-        self.device = qweight.device
-        self.qweight = qweight
-        self.qzeros = qzeros
-        self.scales = scales
-        self.g_idx = g_idx
+        # self.device = qweight.device
+        # self.qweight = qweight
+        # self.qzeros = qzeros
+        # self.scales = scales
+        # self.g_idx = g_idx
         self.bias = bias if bias is not None else None
-        self.group_size = groupsize
 
         global FIXED_BYTES, LAYERS
         FIXED_BYTES = max(FIXED_BYTES, self.scratch_space_fixed())
         LAYERS.append(self)
 
+    @classmethod
+    def from_gptq(
+        cls: Type["QuantLinear"],
+        q_tensors: Dict[str, torch.Tensor],
+        bias: Optional[torch.Tensor],
+        bits,
+    ):
+        return cls(q_tensors, bias, bits)
+
+    @classmethod
+    def from_exl2(
+        cls: Type["QuantLinear"],
+        q_tensors: Dict[str, torch.Tensor],
+        bias: Optional[torch.Tensor],
+        bits,
+    ):
+        return cls(q_tensors, bias, bits)
+
     def post_init(self, temp_dq):
-        assert self.qweight.device.type == "cuda"
-        assert self.qweight.device.index is not None
-        self.q_tensors = {
-            "qweight": self.qweight,
-            "qzeros": self.qzeros,
-            "scales": self.scales,
-            "g_idx": self.g_idx,
-        }
+        device = next(iter(self.q_tensors.values())).device
+        assert device.type == "cuda"
+        assert device.index is not None
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())
 
         # We NEED to keep a pointer on Python side, otherwise the garbage collector will mess with us,

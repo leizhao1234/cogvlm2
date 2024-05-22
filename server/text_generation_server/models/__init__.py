@@ -261,7 +261,7 @@ def get_model(
     quantization_config = config_dict.get("quantization_config", None)
     if quantization_config is not None and quantize is None:
         method = quantization_config.get("quant_method", None)
-        if method in {"gptq", "awq"}:
+        if method in {"gptq", "awq", "exl2"}:
             logger.info(f"Auto selecting quantization method {method}")
             quantize = method
         else:
