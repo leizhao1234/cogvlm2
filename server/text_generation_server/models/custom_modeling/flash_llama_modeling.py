@@ -285,7 +285,7 @@ class LlamaMLP(nn.Module):
                 )
             else:
                 gate = self.act(self.gate_proj(hidden_states))
-                intermediate = self.act(self.up_proj(hidden_states))
+                intermediate = self.up_proj(hidden_states)
                 return self.down_proj(gate * intermediate)
 
 

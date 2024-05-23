@@ -218,10 +218,6 @@ class Weights:
                 "q_weight",
                 "q_scale",
             ]:
-                shapes = [
-                    self.get_sharded(f"{p}.{param}", dim=1).shape for p in prefixes
-                ]
-                logger.info(f"shapes: {shapes}")
                 qtensors[param] = torch.cat(
                     [self.get_sharded(f"{p}.{param}", dim=1) for p in prefixes], dim=1
                 )
@@ -231,19 +227,13 @@ class Weights:
                 "q_scale_max",
                 "q_groups",
             ]:
-                shapes = [
-                    self.get_sharded(f"{p}.{param}", dim=0).shape for p in prefixes
-                ]
-                logger.info(f"{shapes}")
                 qtensors[param] = torch.cat(
                     [self.get_sharded(f"{p}.{param}", dim=0) for p in prefixes], dim=0
                 )
 
             qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
 
-            # bits, groupsize, desc_act, quant_method = self._get_gptq_params()
             bits = self._get_exl2_bits()
-
             weight = (qtensors, bits)
 
         elif quantize in ["gptq", "awq"]:
