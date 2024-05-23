@@ -22,7 +22,7 @@ class TensorParallelHead(SuperLayer):
     @staticmethod
     def load(config, prefix: str, weights):
         if config.quantize == "exl2":
-            weight = weights.get_multi_weights_col([prefix], config.quantize, dim=0)
+            weight = weights.get_weights_col(prefix, config.quantize)
             should_gather = weights.process_group.size() > 1
         elif weights.process_group.size() > 1:
             try:
@@ -44,7 +44,7 @@ class TensorParallelHead(SuperLayer):
             quantize = config.quantize
 
         return TensorParallelHead(
-            get_linear(weight, bias=None, quantize=quantize, max_len=1024),
+            get_linear(weight, bias=None, quantize=quantize),
             process_group=weights.process_group,
             should_gather=should_gather,
         )
@@ -112,7 +112,17 @@ class TensorParallelColumnLinear(SuperLayer):
 
     @classmethod
     def load(cls, config, prefix: str, weights, bias: bool):
-        return cls.load_multi(config, [prefix], weights, bias, dim=0)
+        weight = weights.get_weights_col(prefix, config.quantize)
+        if bias:
+            if config.quantize == "exl2":
+                # TODO: exl2 sharding.
+                b = weights.get_tensor(f"{prefix}.bias")
+            else:
+                b = weights.get_sharded(f"{prefix}.bias", dim=0)
+        else:
+            bias = None
+        linear = get_linear(weight, bias, config.quantize)
+        return cls(linear)
 
     @classmethod
     def load_multi(cls, config, prefixes: List[str], weights, bias: bool, dim: int):

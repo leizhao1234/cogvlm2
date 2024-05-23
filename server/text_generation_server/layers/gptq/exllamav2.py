@@ -1,6 +1,7 @@
 # Adapted from turboderp exllama: https://github.com/turboderp/exllamav2
 
-from typing import Dict, Optional, Type
+from typing import Dict, Optional, Type, Union
+from text_generation_server.utils.weights import Exl2Weight, GPTQWeight
 import torch
 import torch.nn as nn
 
@@ -25,54 +26,23 @@ def ext_gemm_half_q_half(x, q_handle, q4_width, force_cuda):
     return output.view(output_shape)
 
 
-# Group map needed for irregular group sizes
-
-
-def make_group_map(q_groups, num_qrows):
-
-    gr = q_groups.tolist()
-    group_map = []
-    num_groups = len(gr) // 2
-
-    for i in range(num_groups):
-        bits = gr[i * 2]
-        if i < num_groups - 1:
-            qrows = gr[i * 2 + 3] - gr[i * 2 + 1]
-        else:
-            qrows = num_qrows - gr[i * 2 + 1]
-        rows = qrows * 32 // bits
-        for j in range(rows):
-            group_map += [i]
-            group_map += [rows - j]
-
-    return torch.tensor(group_map, dtype=torch.short, device=q_groups.device)
-
-
 # Create Q matrix
 
 
-def ext_make_q_matrix(w: dict, temp_dq, key: str = None):
+def ext_make_q_matrix(w: Exl2Weight | GPTQWeight, temp_dq, key: Optional[str] = None):
     """
     Create Q matrix
     """
     # EXL2
-    # won't work as the moment because the tensors are not the same.
-    if "q_weight" in w:
-        w["q_scale_max"] /= 256
-        w["q_perm"] = w["q_perm"].short()
-        w["q_invperm"] = w["q_invperm"].short()
-
-        if "q_group_map" not in w:
-            w["q_group_map"] = make_group_map(w["q_groups"], w["q_weight"].shape[0])
-
+    if isinstance(w, Exl2Weight):
         return make_q_matrix(
-            w["q_weight"],
-            w["q_perm"],
-            w["q_invperm"],
-            w["q_scale"],
-            w["q_scale_max"],
-            w["q_groups"],
-            w["q_group_map"],
+            w.q_weight,
+            w.q_perm,
+            w.q_invperm,
+            w.q_scale,
+            w.q_scale_max,
+            w.q_groups,
+            w.q_group_map,
             none_tensor,
             none_tensor,
             none_tensor,
@@ -136,6 +106,14 @@ def set_device(device):
 
 def create_exllama_buffers(max_total_tokens: int):
     global FIXED_BYTES, LAYERS, DEVICE
+
+    # Find the size of the scratch space.
+    for layer in LAYERS:
+        logger.info(f"fixed bytes: {FIXED_BYTES}")
+        FIXED_BYTES = max(
+            FIXED_BYTES, layer.scratch_space_fixed(max_input_len=max_total_tokens)
+        )
+
     temp_dq = ExLlamaV2DeviceTensors(DEVICE, FIXED_BYTES)
 
     for layer in LAYERS:
@@ -150,31 +128,28 @@ class QuantLinear(nn.Module):
     # def __init__(self, bits, group_size, infeatures, outfeatures, bias, trainable=False, **kwargs):
     def __init__(
         self,
-        q_tensors: Dict[str, torch.Tensor],
-        bias,
-        bits: int,
-        max_len: Optional[int] = None,
+        weight: Union[Exl2Weight, GPTQWeight],
+        bias: torch.Tensor,
     ):
         super().__init__()
+
+        self.q_handle = None
+        self.q_tensors = weight
+
+        if isinstance(weight, Exl2Weight):
+            self.infeatures = weight.q_invperm.shape[0]
+            self.outfeatures = weight.q_weight.shape[1]
+        elif isinstance(weight, GPTQWeight):
+            self.infeatures = weight.qweight.shape[0] // self.bits * 32
+            self.outfeatures = weight.qweight.shape[1]
+
         # if bits != 4:
         #    raise ValueError(
         #        f"Exllamav2 kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
         #    )
-        self.q_handle = None
-        self.q_tensors = q_tensors
-
-        qweight = (
-            q_tensors["q_weight"] if "q_weight" in q_tensors else q_tensors["qweight"]
-        )
-
-        self.bits = bits
-        self.maxq = 2**self.bits - 1
+        # self.bits = bits
+        # self.maxq = 2**self.bits - 1
         # TODO: if this works, move to from_* functions
-        if "q_invperm" in q_tensors:
-            self.infeatures = q_tensors["q_invperm"].shape[0]
-        else:
-            self.infeatures = qweight.shape[0] // self.bits * 32
-        self.outfeatures = qweight.shape[1]
         self.padding = -self.outfeatures % 32
         self.outfeatures = self.outfeatures + self.padding
 
@@ -185,36 +160,11 @@ class QuantLinear(nn.Module):
         # self.g_idx = g_idx
         self.bias = bias if bias is not None else None
 
-        max_len = max_len if max_len is not None else 4096
-        global FIXED_BYTES, LAYERS
-        if self.scratch_space_fixed(max_input_len=max_len) > FIXED_BYTES:
-            print(
-                f"scratch space {FIXED_BYTES} -> {self.scratch_space_fixed(max_input_len=max_len)}"
-            )
-        FIXED_BYTES = max(FIXED_BYTES, self.scratch_space_fixed(max_input_len=max_len))
+        global LAYERS
         LAYERS.append(self)
 
-    @classmethod
-    def from_gptq(
-        cls: Type["QuantLinear"],
-        q_tensors: Dict[str, torch.Tensor],
-        bias: Optional[torch.Tensor],
-        bits,
-    ):
-        return cls(q_tensors, bias, bits)
-
-    @classmethod
-    def from_exl2(
-        cls: Type["QuantLinear"],
-        q_tensors: Dict[str, torch.Tensor],
-        bias: Optional[torch.Tensor],
-        bits,
-        max_len: Optional[int] = None,
-    ):
-        return cls(q_tensors, bias, bits, max_len=max_len)
-
     def post_init(self, temp_dq):
-        device = next(iter(self.q_tensors.values())).device
+        device = self.q_tensors.q_groups.device
         assert device.type == "cuda"
         assert device.index is not None
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())

@@ -1,4 +1,5 @@
 from typing import Optional
+from text_generation_server.utils.weights import Exl2Weight
 import torch
 from torch.nn import functional as F
 from text_generation_server.utils.import_utils import SYSTEM
@@ -90,7 +91,7 @@ class FastLinearROCm(torch.nn.Module):
         return F.linear(inp, self.weight, self.bias)
 
 
-def get_linear(weight, bias, quantize, max_len: Optional[int] = None):
+def get_linear(weight, bias, quantize):
     if quantize is None:
         if SYSTEM == "rocm":
             linear = FastLinearROCm(weight, bias)
@@ -153,16 +154,14 @@ def get_linear(weight, bias, quantize, max_len: Optional[int] = None):
             quant_type="nf4",
         )
     elif quantize == "exl2":
-        try:
-            qtensors, bits = weight
-        except Exception:
+        if not isinstance(weight, Exl2Weight):
             raise NotImplementedError(
                 f"The passed weight is not `exl2` compatible, loader needs to be updated."
             )
 
         from text_generation_server.layers.gptq import ExllamaQuantLinear
 
-        linear = ExllamaQuantLinear.from_exl2(qtensors, bias, bits, max_len=max_len)
+        linear = ExllamaQuantLinear(weight, bias)
 
     elif quantize == "gptq":
         try:

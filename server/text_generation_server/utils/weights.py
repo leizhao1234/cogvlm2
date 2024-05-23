@@ -1,12 +1,76 @@
+from dataclasses import dataclass
 import os
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Union
 from safetensors import safe_open, SafetensorError
 import torch
 from loguru import logger
 from huggingface_hub import hf_hub_download
 import json
 from text_generation_server.utils.log import log_once
+
+
+@dataclass
+class GPTQWeight:
+    qweight: torch.Tensor
+
+
+@dataclass
+class Exl2Weight:
+    q_weight: torch.Tensor
+    q_scale: torch.Tensor
+    q_invperm: torch.Tensor
+    q_perm: torch.Tensor
+    q_scale_max: torch.Tensor
+    q_groups: torch.Tensor
+    q_group_map: torch.Tensor
+
+    @classmethod
+    def get_tensor(cls, prefix, weight: "Weights"):
+        tensors = {}
+        for key in Exl2Weight.tensor_keys():
+            # TODO: exl2 sharding.
+            tensors[key] = weight.get_tensor(f"{prefix}.{key}")
+
+        tensors["q_group_map"] = Exl2Weight.make_group_map(
+            tensors["q_groups"], tensors["q_weight"].shape[0]
+        )
+        tensors["q_perm"] = torch.argsort(tensors["q_invperm"]).to(torch.int)
+
+        w = Exl2Weight(**tensors)
+        w.q_scale_max /= 256
+        w.q_perm = w.q_perm.short()
+        w.q_invperm = w.q_invperm.short()
+
+        return w
+
+    @staticmethod
+    def make_group_map(q_groups: torch.Tensor, num_qrows: int):
+        gr = q_groups.tolist()
+        group_map = []
+        num_groups = len(gr) // 2
+
+        for i in range(num_groups):
+            bits = gr[i * 2]
+            if i < num_groups - 1:
+                qrows = gr[i * 2 + 3] - gr[i * 2 + 1]
+            else:
+                qrows = num_qrows - gr[i * 2 + 1]
+            rows = qrows * 32 // bits
+            for j in range(rows):
+                group_map += [i]
+                group_map += [rows - j]
+
+        return torch.tensor(group_map, dtype=torch.short, device=q_groups.device)
+
+    @staticmethod
+    def tensor_keys() -> Set[str]:
+        return {"q_weight", "q_scale", "q_invperm", "q_scale_max", "q_groups"}
+
+
+TorchWeight = torch.Tensor
+
+Weight = Union[Exl2Weight, GPTQWeight, TorchWeight]
 
 
 class Weights:
@@ -76,8 +140,9 @@ class Weights:
         f = self._get_handle(filename)
         tensor = f.get_tensor(tensor_name)
         # Special case for gptq which shouldn't convert
-        # u4 which are disguised as int32
-        if tensor.dtype not in [torch.int32, torch.int64]:
+        # u4 which are disguised as int32. Exl2 uses int16
+        # as well.
+        if tensor.dtype not in [torch.int16, torch.int32, torch.int64]:
             tensor = tensor.to(dtype=self.dtype)
         if to_device:
             tensor = tensor.to(device=self.device)
@@ -207,34 +272,15 @@ class Weights:
             weight = weight.to(dtype=self.dtype)
         return weight
 
+    def get_weights_col(self, prefix: str, quantize: str):
+        if quantize == "exl2":
+            return Exl2Weight.get_tensor(prefix, self)
+
+        return self.get_multi_weights_col([prefix], quantize, 0)
+
     def get_multi_weights_col(self, prefixes: List[str], quantize: str, dim: int):
         if quantize == "exl2":
-            # qtensors = self.load_multi(key, ["q_weight", "q_invperm", "q_scale", "q_scale_max", "q_groups", "q_perm", "bias"])
-            # qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
-
-            qtensors = {}
-            for param in [
-                "q_weight",
-                "q_scale",
-            ]:
-                qtensors[param] = torch.cat(
-                    [self.get_sharded(f"{p}.{param}", dim=1) for p in prefixes], dim=1
-                )
-
-            for param in [
-                "q_invperm",
-                "q_scale_max",
-                "q_groups",
-            ]:
-                qtensors[param] = torch.cat(
-                    [self.get_sharded(f"{p}.{param}", dim=0) for p in prefixes], dim=0
-                )
-
-            qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
-
-            bits = self._get_exl2_bits()
-            weight = (qtensors, bits)
-
+            raise ValueError("get_multi_weights_col is not supported for exl2")
         elif quantize in ["gptq", "awq"]:
             try:
                 qweight = torch.cat(
@@ -310,20 +356,7 @@ class Weights:
 
     def get_multi_weights_row(self, prefix: str, quantize: str):
         if quantize == "exl2":
-            qtensors = {}
-            for param in [
-                "q_weight",
-                "q_scale",
-                "q_invperm",
-                "q_scale_max",
-                "q_groups",
-            ]:
-                qtensors[param] = self.get_sharded(f"{prefix}.{param}", dim=0)
-
-            qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
-
-            bits = self._get_exl2_bits()
-            weight = (qtensors, bits)
+            return Exl2Weight.get_tensor(prefix, self)
 
         elif quantize == "gptq":
             use_exllama = True
