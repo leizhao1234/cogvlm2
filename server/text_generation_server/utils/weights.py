@@ -50,7 +50,6 @@ class Weights:
         if self.prefix is not None:
             prefixed = f"{self.prefix}.{tensor_name}"
             names.append(prefixed)
-        logger.info(f"get_filename: {names}")
         for name in names:
             filename = self.routing.get(name, None)
             if filename is not None:
