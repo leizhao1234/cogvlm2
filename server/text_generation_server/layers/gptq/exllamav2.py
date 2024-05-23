@@ -49,44 +49,44 @@ def ext_make_q_matrix(w: Exl2Weight | GPTQWeight, temp_dq, key: Optional[str] = 
             temp_dq,
         )
     # GPTQ
-    elif "qweight" in w:
-        if w["scales"].dtype == torch.float:
-            w["scales"] = w["scales"].half()
+    elif isinstance(w, GPTQWeight):
+        if w.scales.dtype == torch.float:
+            w.scales = w.scales.half()
 
         # GPTQ with g_idx (act_order)
-        if w.get("g_idx", None) is not None and not (w["g_idx"] == 0).all().item():
-            w["q_perm"] = torch.empty(
-                (w["qweight"].shape[0] * 8,),
+        if w.g_idx is not None and not (w.g_idx == 0).all().item():
+            w.q_perm = torch.empty(
+                (w.qweight.shape[0] * 8,),
                 dtype=torch.short,
-                device=w["qweight"].device,
+                device=w.qweight.device,
             )
-            w["q_invperm"] = torch.empty_like(w["q_perm"])
+            w.q_invperm = torch.empty_like(w.q_perm)
             # make_q4 segfaults if g_idx is not on cpu in the act-order case. In the non act-order case, None needs to be passed for g_idx.
             return make_q_matrix(
-                w["qweight"],
-                w["q_perm"],
-                w["q_invperm"],
+                w.qweight,
+                w.q_perm,
+                w.q_invperm,
                 none_tensor,
                 none_tensor,
                 none_tensor,
                 none_tensor,
-                w["qzeros"],
-                w["scales"],
-                w["g_idx"].cpu(),
+                w.qzeros,
+                w.scales,
+                w.g_idx.cpu(),
                 temp_dq,
             )
         # GPTQ without g_idx
         else:
             return make_q_matrix(
-                w["qweight"],
+                w.qweight,
                 none_tensor,
                 none_tensor,
                 none_tensor,
                 none_tensor,
                 none_tensor,
                 none_tensor,
-                w["qzeros"],
-                w["scales"],
+                w.qzeros,
+                w.scales,
                 none_tensor,
                 temp_dq,
             )
@@ -125,7 +125,6 @@ class QuantLinear(nn.Module):
 
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
-    # def __init__(self, bits, group_size, infeatures, outfeatures, bias, trainable=False, **kwargs):
     def __init__(
         self,
         weight: Union[Exl2Weight, GPTQWeight],
@@ -140,20 +139,20 @@ class QuantLinear(nn.Module):
             self.infeatures = weight.q_invperm.shape[0]
             self.outfeatures = weight.q_weight.shape[1]
         elif isinstance(weight, GPTQWeight):
-            self.infeatures = weight.qweight.shape[0] // self.bits * 32
+            if weight.bits != 4:
+                raise ValueError(
+                    f"Exllamav2 kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
+                )
+
+            self.infeatures = weight.qweight.shape[0] // weight.bits * 32
             self.outfeatures = weight.qweight.shape[1]
 
-        # if bits != 4:
-        #    raise ValueError(
-        #        f"Exllamav2 kernel supports only bits=4, requested bits={bits}. Something is wrong in the model initialization."
-        #    )
         # self.bits = bits
         # self.maxq = 2**self.bits - 1
-        # TODO: if this works, move to from_* functions
         self.padding = -self.outfeatures % 32
         self.outfeatures = self.outfeatures + self.padding
 
-        # self.device = qweight.device
+        self.device = weight.device
         # self.qweight = qweight
         # self.qzeros = qzeros
         # self.scales = scales
@@ -164,7 +163,7 @@ class QuantLinear(nn.Module):
         LAYERS.append(self)
 
     def post_init(self, temp_dq):
-        device = self.q_tensors.q_groups.device
+        device = self.q_tensors.device
         assert device.type == "cuda"
         assert device.index is not None
         temp_dq = temp_dq.get_scratch_slice(self.temp_dq_size())

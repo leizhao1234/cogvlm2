@@ -1,5 +1,5 @@
 from typing import Optional
-from text_generation_server.utils.weights import Exl2Weight
+from text_generation_server.utils.weights import Exl2Weight, GPTQWeight
 import torch
 from torch.nn import functional as F
 from text_generation_server.utils.import_utils import SYSTEM
@@ -164,14 +164,12 @@ def get_linear(weight, bias, quantize):
         linear = ExllamaQuantLinear(weight, bias)
 
     elif quantize == "gptq":
-        try:
-            qweight, qzeros, scales, g_idx, bits, groupsize, use_exllama = weight
-        except Exception:
+        if not isinstance(weight, GPTQWeight):
             raise NotImplementedError(
                 f"The passed weight is not `gptq` compatible, loader needs to be updated."
             )
 
-        if use_exllama:
+        if weight.use_exllama:
             try:
                 from text_generation_server.layers.gptq import (
                     ExllamaQuantLinear,
@@ -181,20 +179,18 @@ def get_linear(weight, bias, quantize):
                     f"Exllama gptq kernels are not installed. Install them `cd server/exllama_kernels && python setup.py install && cd ../exllamav2_kernels && python setup.py install`"
                 )
 
-            linear = ExllamaQuantLinear(
-                qweight, qzeros, scales, g_idx, bias, bits, groupsize
-            )
+            linear = ExllamaQuantLinear(weight, bias)
         else:
             from text_generation_server.layers.gptq.quant_linear import QuantLinear
 
             linear = QuantLinear(
-                qweight,
-                qzeros,
-                scales,
-                g_idx,
+                weight.qweight,
+                weight.qzeros,
+                weight.scales,
+                weight.g_idx,
                 bias,
-                bits,
-                groupsize,
+                weight.bits,
+                weight.groupsize,
             )
     elif quantize == "awq":
         try:
