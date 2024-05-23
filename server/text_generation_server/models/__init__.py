@@ -728,6 +728,8 @@ def get_model(
         raise NotImplementedError("4bit quantization is not supported for AutoModel")
     elif quantize == "eetq":
         raise NotImplementedError("Eetq quantization is not supported for AutoModel")
+    if quantize == "exl2":
+        raise NotImplementedError("exl2 quantization is not supported for AutoModel")
     if model_type in modeling_auto.MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
         return CausalLM(
             model_id,

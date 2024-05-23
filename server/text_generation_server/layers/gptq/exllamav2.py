@@ -148,7 +148,13 @@ class QuantLinear(nn.Module):
     """Linear layer implementation with per-group 4-bit quantization of the weights"""
 
     # def __init__(self, bits, group_size, infeatures, outfeatures, bias, trainable=False, **kwargs):
-    def __init__(self, q_tensors: Dict[str, torch.Tensor], bias, bits):
+    def __init__(
+        self,
+        q_tensors: Dict[str, torch.Tensor],
+        bias,
+        bits: int,
+        max_len: Optional[int] = None,
+    ):
         super().__init__()
         # if bits != 4:
         #    raise ValueError(
@@ -163,7 +169,11 @@ class QuantLinear(nn.Module):
 
         self.bits = bits
         self.maxq = 2**self.bits - 1
-        self.infeatures = qweight.shape[0] // self.bits * 32
+        # TODO: if this works, move to from_* functions
+        if "q_invperm" in q_tensors:
+            self.infeatures = q_tensors["q_invperm"].shape[0]
+        else:
+            self.infeatures = qweight.shape[0] // self.bits * 32
         self.outfeatures = qweight.shape[1]
         self.padding = -self.outfeatures % 32
         self.outfeatures = self.outfeatures + self.padding
@@ -175,8 +185,13 @@ class QuantLinear(nn.Module):
         # self.g_idx = g_idx
         self.bias = bias if bias is not None else None
 
+        max_len = max_len if max_len is not None else 4096
         global FIXED_BYTES, LAYERS
-        FIXED_BYTES = max(FIXED_BYTES, self.scratch_space_fixed())
+        if self.scratch_space_fixed(max_input_len=max_len) > FIXED_BYTES:
+            print(
+                f"scratch space {FIXED_BYTES} -> {self.scratch_space_fixed(max_input_len=max_len)}"
+            )
+        FIXED_BYTES = max(FIXED_BYTES, self.scratch_space_fixed(max_input_len=max_len))
         LAYERS.append(self)
 
     @classmethod
@@ -194,8 +209,9 @@ class QuantLinear(nn.Module):
         q_tensors: Dict[str, torch.Tensor],
         bias: Optional[torch.Tensor],
         bits,
+        max_len: Optional[int] = None,
     ):
-        return cls(q_tensors, bias, bits)
+        return cls(q_tensors, bias, bits, max_len=max_len)
 
     def post_init(self, temp_dq):
         device = next(iter(self.q_tensors.values())).device

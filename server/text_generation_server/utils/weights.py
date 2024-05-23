@@ -103,8 +103,8 @@ class Weights:
         else:
             raise NotImplementedError("Let's make that generic when needed")
         # Special case for gptq which shouldn't convert
-        # u4 which are disguised as int32
-        if tensor.dtype != torch.int32:
+        # u4 which are disguised as int32. exl2 uses int16.
+        if tensor.dtype not in (torch.int16, torch.int32):
             tensor = tensor.to(dtype=self.dtype)
         tensor = tensor.to(device=self.device)
         return tensor
@@ -331,6 +331,8 @@ class Weights:
             ]:
                 qtensors[param] = self.get_sharded(f"{prefix}.{param}", dim=0)
 
+            qtensors["q_perm"] = torch.argsort(qtensors["q_invperm"]).to(torch.int)
+
             bits = self._get_exl2_bits()
             weight = (qtensors, bits)
 
@@ -437,7 +439,7 @@ class Weights:
         return weight
 
     def _get_exl2_bits(self) -> int:
-        return self.gptq_bits
+        return int(self.gptq_bits)
 
     def _get_gptq_params(self) -> Tuple[int, int, int, str]:
         try:

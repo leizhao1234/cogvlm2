@@ -42,8 +42,9 @@ class TensorParallelHead(SuperLayer):
             quantize = None
         else:
             quantize = config.quantize
+
         return TensorParallelHead(
-            get_linear(weight, bias=None, quantize=quantize),
+            get_linear(weight, bias=None, quantize=quantize, max_len=1024),
             process_group=weights.process_group,
             should_gather=should_gather,
         )

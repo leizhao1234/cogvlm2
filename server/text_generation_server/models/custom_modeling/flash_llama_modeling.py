@@ -286,7 +286,7 @@ class LlamaMLP(nn.Module):
             else:
                 gate = self.act(self.gate_proj(hidden_states))
                 intermediate = self.act(self.up_proj(hidden_states))
-                return gate * intermediate
+                return self.down_proj(gate * intermediate)
 
 
 class FlashLlamaLayer(nn.Module):

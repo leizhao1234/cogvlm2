@@ -1,3 +1,4 @@
+from typing import Optional
 import torch
 from torch.nn import functional as F
 from text_generation_server.utils.import_utils import SYSTEM
@@ -89,7 +90,7 @@ class FastLinearROCm(torch.nn.Module):
         return F.linear(inp, self.weight, self.bias)
 
 
-def get_linear(weight, bias, quantize):
+def get_linear(weight, bias, quantize, max_len: Optional[int] = None):
     if quantize is None:
         if SYSTEM == "rocm":
             linear = FastLinearROCm(weight, bias)
@@ -161,7 +162,7 @@ def get_linear(weight, bias, quantize):
 
         from text_generation_server.layers.gptq import ExllamaQuantLinear
 
-        linear = ExllamaQuantLinear.from_exl2(qtensors, bias, bits)
+        linear = ExllamaQuantLinear.from_exl2(qtensors, bias, bits, max_len=max_len)
 
     elif quantize == "gptq":
         try:
