@@ -276,17 +276,14 @@ class LlamaMLP(nn.Module):
             )
             _custom_C.LLMM_Silu(self.gate_up_proj.linear.weight, hidden_states, out, 8)
             return self.down_proj(out)
+        elif hasattr(self, "gate_up_proj"):
+            gate_up_states = self.gate_up_proj(hidden_states)
+            gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
+            return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
         else:
-            if hasattr(self, "gate_up_proj"):
-                gate_up_states = self.gate_up_proj(hidden_states)
-                gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
-                return self.down_proj(
-                    self.act(gate_up_states[:, 0]) * gate_up_states[:, 1]
-                )
-            else:
-                gate = self.act(self.gate_proj(hidden_states))
-                intermediate = self.up_proj(hidden_states)
-                return self.down_proj(gate * intermediate)
+            gate = self.act(self.gate_proj(hidden_states))
+            intermediate = self.up_proj(hidden_states)
+            return self.down_proj(gate * intermediate)
 
 
 class FlashLlamaLayer(nn.Module):
