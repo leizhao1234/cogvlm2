@@ -1,7 +1,26 @@
 import torch
 from torch.nn import functional as F
-from typing import List
+from typing import Iterable, List
 from text_generation_server.layers.linear import get_linear, FastLinear
+
+
+class LayerConcat(torch.nn.Module):
+    """
+    Apply multiple layers to the input and concatenate their
+    outputs.
+    """
+
+    def __init__(self, layers: Iterable[torch.nn.Module], dim: int = -1):
+        """
+        `dim` is the dimension along which layer outputs are concatenated.
+        """
+        super().__init__()
+        self.layers = layers
+        self.dim = dim
+
+    def forward(self, x: torch.Tensor):
+        outputs = [layer(x) for layer in self.layers]
+        return torch.cat(outputs, self.dim)
 
 
 class SuperLayer(torch.nn.Module):
@@ -116,9 +135,9 @@ class TensorParallelColumnLinear(SuperLayer):
         if bias:
             if config.quantize == "exl2":
                 # TODO: exl2 sharding.
-                b = weights.get_tensor(f"{prefix}.bias")
+                bias = weights.get_tensor(f"{prefix}.bias")
             else:
-                b = weights.get_sharded(f"{prefix}.bias", dim=0)
+                bias = weights.get_sharded(f"{prefix}.bias", dim=0)
         else:
             bias = None
         linear = get_linear(weight, bias, config.quantize)
@@ -126,16 +145,23 @@ class TensorParallelColumnLinear(SuperLayer):
 
     @classmethod
     def load_multi(cls, config, prefixes: List[str], weights, bias: bool, dim: int):
-        weight = weights.get_multi_weights_col(
-            prefixes, quantize=config.quantize, dim=dim
-        )
-
-        if bias:
-            b = [weights.get_sharded(f"{p}.bias", dim=0) for p in prefixes]
-            bias = torch.cat(b, dim=dim)
+        if config.quantize == "exl2":
+            linears = []
+            for prefix in prefixes:
+                weight = weights.get_weights_col(prefix, config.quantize)
+                b = weights.get_tensor(f"{prefix}.bias") if bias else None
+                linears.append(get_linear(weight, b, config.quantize))
+            linear = LayerConcat(linears)
         else:
-            bias = None
-        linear = get_linear(weight, bias, config.quantize)
+            weight = weights.get_multi_weights_col(
+                prefixes, quantize=config.quantize, dim=dim
+            )
+            if bias:
+                b = [weights.get_sharded(f"{p}.bias", dim=0) for p in prefixes]
+                bias = torch.cat(b, dim=dim)
+            else:
+                bias = None
+            linear = get_linear(weight, bias, config.quantize)
         return cls(linear)
 
 

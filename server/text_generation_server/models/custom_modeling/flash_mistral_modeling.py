@@ -115,20 +115,19 @@ def load_attention(config, prefix, weights):
         )
 
 
-def load_attention_exl2(config, prefix, weights):
-    return (
-        TensorParallelColumnLinear.load(config, f"{prefix}.q_proj", weights, False),
-        TensorParallelColumnLinear.load(config, f"{prefix}.k_proj", weights, False),
-        TensorParallelColumnLinear.load(config, f"{prefix}.v_proj", weights, False),
-    )
-
-
 def _load_gqa(config, prefix: str, weights):
     assert config.hidden_size % config.num_attention_heads == 0
     assert config.num_attention_heads % weights.process_group.size() == 0
 
+    prefixes = [f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj"]
+
+    if config.quantize == "exl2":
+        return TensorParallelColumnLinear.load_multi(
+            config, prefixes=prefixes, dim=0, weights=weights, bias=False
+        )
+
     weight = weights.get_multi_weights_col(
-        prefixes=[f"{prefix}.q_proj", f"{prefix}.k_proj", f"{prefix}.v_proj"],
+        prefixes=prefixes,
         quantize=config.quantize,
         dim=0,
     )
@@ -183,12 +182,7 @@ class MistralAttention(torch.nn.Module):
             config.num_key_value_heads // weights.process_group.size()
         )
 
-        if config.quantize == "exl2":
-            self.query, self.key, self.value = load_attention_exl2(
-                config, prefix, weights
-            )
-        else:
-            self.query_key_value = load_attention(config, prefix, weights)
+        self.query_key_value = load_attention(config, prefix, weights)
 
         self.o_proj = TensorParallelRowLinear.load(
             config,
@@ -214,24 +208,16 @@ class MistralAttention(torch.nn.Module):
         max_s,
         prefill_cache_indices,
     ):
-
-        if hasattr(self, "query_key_value"):
-            qkv = self.query_key_value(hidden_states)
-            query, kv = qkv.split(
-                [
-                    self.head_size * self.num_heads,
-                    2 * self.head_size * self.num_key_value_heads,
-                ],
-                dim=1,
-            )
-            query = query.view(-1, self.num_heads, self.head_size)
-            kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
-        else:
-            query = self.query(hidden_states).view(-1, self.num_heads, self.head_size)
-            kv = torch.concat(
-                [self.key(hidden_states), self.value(hidden_states)], dim=1
-            )
-            kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
+        qkv = self.query_key_value(hidden_states)
+        query, kv = qkv.split(
+            [
+                self.head_size * self.num_heads,
+                2 * self.head_size * self.num_key_value_heads,
+            ],
+            dim=1,
+        )
+        query = query.view(-1, self.num_heads, self.head_size)
+        kv = kv.view(-1, 2, self.num_key_value_heads, self.head_size)
 
         self.rotary_emb(query, torch.select(kv, dim=1, index=0), cos, sin)
 
@@ -293,24 +279,14 @@ class MistralMLP(nn.Module):
                 ),
             )
         )
-
-        if config.quantize == "exl2":
-            self.gate_proj = TensorParallelColumnLinear.load(
-                config, f"{prefix}.gate_proj", weights, False
-            )
-            self.up_proj = TensorParallelColumnLinear.load(
-                config, f"{prefix}.up_proj", weights, False
-            )
-        else:
-            # Fuse gate and up proj
-            self.gate_up_proj = TensorParallelColumnLinear.load_multi(
-                config,
-                prefixes=[f"{prefix}.gate_proj", f"{prefix}.up_proj"],
-                weights=weights,
-                dim=0,
-                bias=False,
-            )
-
+        # Fuse gate and up proj
+        self.gate_up_proj = TensorParallelColumnLinear.load_multi(
+            config,
+            prefixes=[f"{prefix}.gate_proj", f"{prefix}.up_proj"],
+            weights=weights,
+            dim=0,
+            bias=False,
+        )
         self.down_proj = TensorParallelRowLinear.load(
             config,
             prefix=f"{prefix}.down_proj",
@@ -339,14 +315,10 @@ class MistralMLP(nn.Module):
             )
             _custom_C.LLMM_Silu(self.gate_up_proj.linear.weight, hidden_states, out, 8)
             return self.down_proj(out)
-        elif hasattr(self, "gate_up_proj"):
+        else:
             gate_up_states = self.gate_up_proj(hidden_states)
             gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
             return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
-        else:
-            gate = self.act(self.gate_proj(hidden_states))
-            intermediate = self.up_proj(hidden_states)
-            return self.down_proj(gate * intermediate)
 
 
 class MistralLayer(nn.Module):
