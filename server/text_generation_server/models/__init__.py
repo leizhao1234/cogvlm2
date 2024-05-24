@@ -267,6 +267,11 @@ def get_model(
         else:
             logger.info(f"Unknown quantization method {method}")
 
+    if quantize == "exl2" and sharded:
+        raise RuntimeError(
+            "Sharding is currently not supported with `exl2` quantization"
+        )
+
     if model_type == "ssm":
         return Mamba(
             model_id,

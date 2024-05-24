@@ -1435,6 +1435,11 @@ fn main() -> Result<(), LauncherError> {
 
     let num_shard = find_num_shards(args.sharded, args.num_shard)?;
     if num_shard > 1 {
+        if matches!(args.quantize, Some(Quantization::Exl2)) {
+            return Err(LauncherError::ArgumentValidation(
+                "Sharding is currently not supported with `exl2` quantization".into(),
+            ));
+        }
         tracing::info!("Sharding model on {num_shard} processes");
     }
 
